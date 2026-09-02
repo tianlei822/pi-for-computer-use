@@ -1,0 +1,13 @@
+{
+  "userDataDir": "browser-profile",
+  "sendScreenshots": false,
+  "startUrl": "https://example.com",
+  "allowedOrigins": [
+    "https://example.com",
+    "https://google.com",
+    "https://www.google.com",
+    "https://www.baidu.com",
+    "https://wappass.baidu.com"
+  ],
+  "headless": false
+}

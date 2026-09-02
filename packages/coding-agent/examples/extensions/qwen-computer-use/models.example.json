@@ -1,0 +1,33 @@
+{
+  "providers": {
+    "qwen-cua-server": {
+      "baseUrl": "http://127.0.0.1:18001/v1",
+      "api": "openai-completions",
+      "apiKey": "$QWEN38_API_KEY",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "supportsUsageInStreaming": false,
+        "maxTokensField": "max_tokens"
+      },
+      "models": [
+        {
+          "id": "REPLACE_WITH_SERVER_MODEL_ID",
+          "name": "Qwen3.8 CUA Server",
+          "reasoning": false,
+          "input": ["text", "image"],
+          "contextWindow": 40960,
+          "maxTokens": 12288,
+          "samplingParams": {
+            "temperature": 0.01,
+            "top_p": 0.8,
+            "chat_template_kwargs": {
+              "enable_thinking": false,
+              "preserve_thinking": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

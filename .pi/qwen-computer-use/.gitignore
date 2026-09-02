@@ -1,0 +1,5 @@
+*
+!.gitignore
+!models.json
+!qwen-computer-use.json
+!settings.json
