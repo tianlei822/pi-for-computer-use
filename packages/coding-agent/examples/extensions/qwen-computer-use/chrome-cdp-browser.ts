@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	assertAllowedNavigation,
+	assertAllowedPageTarget,
 	type BrowserObservation,
 	type BrowserPageSummary,
 	type BrowserViewport,
@@ -311,7 +312,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 	async observe(signal?: AbortSignal): Promise<BrowserObservation> {
 		await this.ensureStarted(signal);
 		const targets = await this.listTargets(signal);
-		for (const candidate of targets) assertAllowedNavigation(candidate.url, this.allowedOrigins);
+		for (const candidate of targets) assertAllowedPageTarget(candidate.url, this.allowedOrigins);
 		const target = this.selectTarget(targets);
 		return this.capture(target, targets, signal);
 	}
@@ -325,7 +326,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 			const targets = await this.listTargets(signal);
 			const target = targets.find((candidate) => candidate.id === request.pageId);
 			if (!target) throw new Error(`unknown pageId: ${request.pageId}`);
-			assertAllowedNavigation(target.url, this.allowedOrigins);
+			assertAllowedPageTarget(target.url, this.allowedOrigins);
 			await this.withClient(target, signal, (client) => client.send("Page.bringToFront", {}, signal));
 			this.selectedPageId = target.id;
 			return this.observe(signal);
@@ -333,7 +334,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 
 		const targets = await this.listTargets(signal);
 		const target = this.selectTarget(targets);
-		assertAllowedNavigation(target.url, this.allowedOrigins);
+		assertAllowedPageTarget(target.url, this.allowedOrigins);
 		await this.withClient(target, signal, async (client) => {
 			if (request.action === "navigate") {
 				const url = assertAllowedNavigation(request.url, this.allowedOrigins);
@@ -392,7 +393,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 		});
 
 		const finalTargets = await this.listTargets(signal);
-		for (const candidate of finalTargets) assertAllowedNavigation(candidate.url, this.allowedOrigins);
+		for (const candidate of finalTargets) assertAllowedPageTarget(candidate.url, this.allowedOrigins);
 		return this.observe(signal);
 	}
 
@@ -504,7 +505,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 				const target = this.selectTarget(await this.listTargets(signal));
 				await this.withClient(target, signal, (client) => this.navigate(client, this.startUrl, signal));
 				const finalTarget = this.selectTarget(await this.listTargets(signal));
-				assertAllowedNavigation(finalTarget.url, this.allowedOrigins);
+				assertAllowedPageTarget(finalTarget.url, this.allowedOrigins);
 			}
 			return;
 		}
@@ -588,7 +589,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 				screenshot = requireString(result.data, "Page.captureScreenshot data");
 			}
 			const freshTargets = await this.listTargets(signal);
-			for (const candidate of freshTargets) assertAllowedNavigation(candidate.url, this.allowedOrigins);
+			for (const candidate of freshTargets) assertAllowedPageTarget(candidate.url, this.allowedOrigins);
 			const freshTarget = freshTargets.find((candidate) => candidate.id === target.id) ?? target;
 			const pages: BrowserPageSummary[] = freshTargets.map((page) => ({
 				pageId: page.id,

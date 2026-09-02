@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	assertAllowedNavigation,
+	assertAllowedPageTarget,
 	type BrowserObservation,
 	type ComputerUseBrowser,
 	type ComputerUseRequest,
@@ -14,6 +15,8 @@ import { loadComputerUseConfig } from "../examples/extensions/qwen-computer-use/
 import {
 	createComputerUseTool,
 	createInitialObservationMessage,
+	isManualVerificationDetails,
+	isManualVerificationObservation,
 	retainLatestComputerUseScreenshot,
 } from "../examples/extensions/qwen-computer-use/tool.ts";
 import { loadExtensions } from "../src/core/extensions/loader.ts";
@@ -33,6 +36,22 @@ const textOnlyObservation: BrowserObservation = {
 	url: "http://127.0.0.1:4321/fixture",
 	viewport: { width: 1280, height: 720 },
 	text: "Local fixture",
+};
+
+const baiduVerificationObservation: BrowserObservation = {
+	pageId: "page-1",
+	title: "百度安全验证",
+	url: "https://wappass.baidu.com/static/captcha/tuxing_v2.html?backurl=https%3A%2F%2Fwww.baidu.com%2Fs",
+	viewport: { width: 1280, height: 720 },
+	text: "请完成下方验证后继续操作",
+};
+
+const googleVerificationObservation: BrowserObservation = {
+	pageId: "page-1",
+	title: "Sorry...",
+	url: "https://www.google.com/sorry/index?continue=https%3A%2F%2Fwww.google.com%2Fsearch%3Fq%3Dweather",
+	viewport: { width: 1280, height: 720 },
+	text: "Our systems have detected unusual traffic from your computer network.",
 };
 
 class FakeBrowser implements ComputerUseBrowser {
@@ -153,6 +172,13 @@ describe("qwen computer use contract", () => {
 		expect(() => assertAllowedNavigation("http://user:pass@127.0.0.1:4321", allowedOrigins)).toThrow("credentials");
 	});
 
+	it("treats a transient empty Chrome page target as about:blank", () => {
+		const allowedOrigins = new Set(["http://127.0.0.1:4321"]);
+
+		expect(assertAllowedPageTarget("", allowedOrigins).href).toBe("about:blank");
+		expect(() => assertAllowedNavigation("", allowedOrigins)).toThrow("invalid");
+	});
+
 	it("registers a sequential tool and returns a fresh screenshot", async () => {
 		const browser = new FakeBrowser();
 		const tool = createComputerUseTool(async () => browser);
@@ -194,6 +220,87 @@ describe("qwen computer use contract", () => {
 			"coordinate",
 		);
 		expect(browser.requests).toEqual([]);
+	});
+
+	it("detects Baidu and Google manual verification pages", () => {
+		expect(isManualVerificationObservation(baiduVerificationObservation)).toBe(true);
+		expect(isManualVerificationObservation(googleVerificationObservation)).toBe(true);
+		expect(
+			isManualVerificationObservation({
+				...googleVerificationObservation,
+				title: "weather - Google Search",
+				url: "https://www.google.com/search?q=weather",
+			}),
+		).toBe(false);
+		expect(isManualVerificationObservation(observation)).toBe(false);
+	});
+
+	it("blocks automated input while Baidu manual verification is pending", async () => {
+		const browser = new FakeBrowser();
+		browser.observe = async () => baiduVerificationObservation;
+		const tool = createComputerUseTool(async () => browser);
+
+		const result = await tool.execute(
+			"call-verification",
+			{ action: "left_click", coordinate: [188, 581] },
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(browser.requests).toEqual([]);
+		expect(result.details).toMatchObject({ manualVerificationRequired: true, blocked: true });
+		expect(JSON.parse(result.content[0]?.type === "text" ? result.content[0].text : "{}")).toMatchObject({
+			ok: false,
+			blocked: true,
+			manualVerificationRequired: true,
+		});
+	});
+
+	it("blocks automated input while Google manual verification is pending", async () => {
+		const browser = new FakeBrowser();
+		browser.observe = async () => googleVerificationObservation;
+		const tool = createComputerUseTool(async () => browser);
+
+		const result = await tool.execute(
+			"call-google-verification",
+			{ action: "type", text: "weather" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(browser.requests).toEqual([]);
+		expect(result.details).toMatchObject({ manualVerificationRequired: true, blocked: true });
+		expect(JSON.parse(result.content[0]?.type === "text" ? result.content[0].text : "{}")).toMatchObject({
+			ok: false,
+			blocked: true,
+			manualVerificationRequired: true,
+		});
+	});
+
+	it("marks a Baidu challenge reached after an action for manual verification", async () => {
+		const browser = new FakeBrowser();
+		browser.execute = async (request) => {
+			browser.requests.push(request);
+			return baiduVerificationObservation;
+		};
+		const tool = createComputerUseTool(async () => browser);
+
+		const result = await tool.execute(
+			"call-search",
+			{ action: "key", key: "Enter" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+
+		expect(browser.requests).toEqual([{ action: "key", keys: ["Enter"] }]);
+		expect(isManualVerificationDetails(result.details)).toBe(true);
+		expect(JSON.parse(result.content[0]?.type === "text" ? result.content[0].text : "{}")).toMatchObject({
+			ok: false,
+			manualVerificationRequired: true,
+		});
 	});
 
 	it("injects the initial local screenshot as a hidden user-context message", () => {

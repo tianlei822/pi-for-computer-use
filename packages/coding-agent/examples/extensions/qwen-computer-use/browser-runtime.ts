@@ -85,3 +85,7 @@ export function assertAllowedNavigation(rawUrl: string, allowedOrigins: Readonly
 	}
 	return url;
 }
+
+export function assertAllowedPageTarget(rawUrl: string, allowedOrigins: ReadonlySet<string>): URL {
+	return assertAllowedNavigation(rawUrl === "" ? "about:blank" : rawUrl, allowedOrigins);
+}

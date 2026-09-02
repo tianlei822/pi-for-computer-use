@@ -275,6 +275,39 @@ remained alive and continued issuing `computer_use` calls without an uncaught
 CDP timeout. This separates the remaining site CAPTCHA from the fixed runtime
 failure.
 
+A 2026-09-02 trace reproduced the same boundary with search term `agent`:
+`Enter` redirected to `wappass.baidu.com/static/captcha/tuxing_v2.html`, after
+which an automated coordinate click caused Baidu to report “存在安全风险，请再次验证”.
+This establishes that the challenge is a Baidu server-side risk decision rather
+than a CDP navigation timeout.
+
+A separate 2026-09-02 session trace recorded Google redirecting a normal search
+to `https://www.google.com/sorry/index?...`. This is Google's corresponding
+server-side unusual-traffic challenge, not a missing navigation permission.
+The configured `https://www.google.com` origin already covers this path.
+
+The extension now detects the Baidu verification URL/title and Google
+`*.google.com/sorry/` URLs. It adds `manualVerificationRequired: true` to the
+observation, returns an error result, and prevents automated click,
+double-click, typing, key, and scroll actions until the challenge is no longer
+present. The visible Chrome window and dedicated persistent profile remain open
+so a person can complete the challenge manually and reuse the resulting site
+data. A later Pi prompt rechecks the page before allowing browser input.
+
+Using global macOS mouse or keyboard events to imitate a person is explicitly
+out of scope. It could affect other applications, would attempt to disguise
+automation from site controls, and cannot reliably prevent a server-side
+challenge. The supported recovery path is manual verification followed by
+persistent-profile reuse.
+
+A post-fix live smoke with a fresh profile reached the same Baidu verification
+URL after `Enter`. The returned observation contained
+`manualVerificationRequired: true`; a subsequent coordinate click returned
+`blocked: true` and was not dispatched to Chrome. The run also exposed a
+transient empty page-target URL during navigation. Target enumeration now
+normalizes only that Chrome-internal transition to `about:blank`, while
+user-supplied navigation URLs retain strict URL and origin checks.
+
 For another target, set both `startUrl` and its exact origin in
 `allowedOrigins`; include the port when it is not the scheme default. Stop Pi
 and the tunnel with `Ctrl+C` in their respective terminals. Pi session shutdown
@@ -335,10 +368,10 @@ precedence over JSON values:
 | `headless` | `PI_CUA_HEADLESS` | Use headless Chrome | `false` |
 
 The JSON parser rejects unknown keys and invalid types. A persistent profile
-keeps persistent cookies across Pi restarts, so a manually completed Baidu
-verification can be reused, but it cannot guarantee that Baidu will not ask
-again. The profile directory must not be committed or shared with the user's
-normal Chrome profile. Navigation waits for
+keeps site data across Pi restarts, so a manually completed Baidu or Google
+verification can be reused, but it cannot guarantee that either site will not
+ask again. The profile directory must not be committed or shared with the
+user's normal Chrome profile. Navigation waits for
 `Page.domContentEventFired` instead of a full page load. If that event still
 exceeds the CDP request timeout, the extension handles its rejection immediately
 even while `Page.navigate` is pending, then continues with the current

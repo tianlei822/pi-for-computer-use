@@ -142,6 +142,34 @@ filter is non-destructive: old screenshots can remain in the session JSONL even
 though they are omitted from later model requests. With the checked-in
 `sendScreenshots: false`, no browser image is captured or transmitted.
 
+## Site verification handoff
+
+Baidu may redirect a search to `wappass.baidu.com/static/captcha/`, while
+Google may redirect to `*.google.com/sorry/`. Both are server-side risk
+controls. A persistent profile can reuse site data after a person completes a
+challenge, but it cannot guarantee that either site will never request
+verification again.
+
+The extension treats both verification URL patterns, plus Baidu pages titled
+`百度安全验证`, as a manual-action boundary. It sets
+`manualVerificationRequired: true`, returns the observation as a tool error,
+and blocks automated click, double-click, typing, key, and scroll actions while
+the challenge remains visible. Complete the verification manually in the
+visible Chrome window, then send a new Pi prompt. The next browser action first
+checks the current page and resumes only after the verification page is gone.
+
+The extension intentionally does not use macOS-wide mouse or keyboard events to
+simulate a person and does not attempt to solve or evade CAPTCHA challenges.
+OS-wide input could affect other applications and disguising automation would
+not make site risk decisions predictable.
+
+Live session traces contain both a Baidu CAPTCHA redirect and a Google
+`/sorry/index` redirect. A fresh-profile Baidu smoke test confirmed the
+boundary: the redirect returned `manualVerificationRequired: true`, and the
+next coordinate click returned `blocked: true` without being dispatched to
+Chrome. Regression tests cover the same detection and input blocking for
+Google.
+
 ## Run
 
 ```bash
@@ -191,12 +219,14 @@ frames or other page resources. A live Baidu search showed
 checked-in configuration permits that exact origin. Navigation waits for DOM
 content, but a slow page no longer terminates Pi when that CDP event exceeds the
 request timeout; its rejection is handled immediately even while
-`Page.navigate` is still pending.
+`Page.navigate` is still pending. A transient empty URL reported for a Chrome
+page target is treated as `about:blank`; user-supplied navigation URLs remain
+strictly validated.
 
 The checked-in configuration uses a dedicated persistent profile and binds
-DevTools to loopback. Persistent cookies allow a manually completed site
-verification to survive Pi restarts, which can reduce repeated Baidu
-verification. Baidu can still require verification based on its own risk
+DevTools to loopback. Persistent site data allows a manually completed
+verification to survive Pi restarts, which can reduce repeated challenges.
+Baidu and Google can still require verification based on their own risk
 controls. Use this directory for only one Pi browser at a time, do not commit
 it, and do not point `userDataDir` at the user's normal Chrome profile.
 
