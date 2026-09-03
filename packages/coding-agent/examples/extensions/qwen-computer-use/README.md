@@ -18,7 +18,8 @@ This checkout contains the verified reusable configuration in
 - `models.json` selects the remote Qwen endpoint and model;
 - `qwen-computer-use.json` opens `example.com`, allows Google and Baidu, and
   keeps site data in a dedicated browser profile;
-- `settings.json` configures Pi auto-compaction for this 16K-context model;
+- `settings.json` configures Pi auto-compaction and enables the local file
+  tools used by this model;
 - `.gitignore` excludes sessions, credentials, browser state, and other runtime
   files that Pi may create in that directory.
 
@@ -70,7 +71,8 @@ tokens than this model can hold. The checked-in
     "enabled": true,
     "reserveTokens": 4096,
     "keepRecentTokens": 4096
-  }
+  },
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls"]
 }
 ```
 
@@ -81,6 +83,26 @@ values and falls back to local token estimation. A server response with
 `finish_reason: "length"` can surface as `Response was truncated before
 completion`; start a new session if an existing session still contains a large
 pre-change history.
+
+## Local filesystem tools
+
+The Qwen profile explicitly enables Pi's local `read`, `write`, `edit`,
+`grep`, `find`, and `ls` tools. It also preserves the existing `bash` tool.
+These tools run in the local Pi process; the remote Qwen server only produces
+their tool calls and receives their results.
+
+| Operation | Tool |
+| --- | --- |
+| Read a file | `read` |
+| Create or replace a file | `write` |
+| Replace selected content in a file | `edit` |
+| Search file contents | `grep` |
+| Search paths by glob | `find` |
+| List a directory | `ls` |
+
+The browser-scoped `computer_use` tool does not duplicate filesystem actions.
+Starting Pi with `--tools`, `--exclude-tools`, `--no-tools`, or
+`--no-builtin-tools` can override or disable the configured tools.
 
 ## Configure the local browser
 
@@ -230,6 +252,8 @@ Baidu and Google can still require verification based on their own risk
 controls. Use this directory for only one Pi browser at a time, do not commit
 it, and do not point `userDataDir` at the user's normal Chrome profile.
 
-The first version intentionally excludes OS-wide input, arbitrary JavaScript,
-shell commands, downloads, and automatic CAPTCHA handling. Browser page content
-and model-produced tool arguments are untrusted data.
+The `computer_use` tool intentionally excludes OS-wide input, arbitrary
+JavaScript, filesystem operations, shell commands, downloads, and automatic
+CAPTCHA handling. Local filesystem and shell access comes from Pi's separate
+built-in tools configured in `settings.json`. Browser page content and
+model-produced tool arguments are untrusted data.

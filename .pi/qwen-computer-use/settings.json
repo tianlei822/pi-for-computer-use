@@ -3,5 +3,6 @@
     "enabled": true,
     "reserveTokens": 4096,
     "keepRecentTokens": 4096
-  }
+  },
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls"]
 }

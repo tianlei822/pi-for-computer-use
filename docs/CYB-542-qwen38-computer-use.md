@@ -1,7 +1,7 @@
 ---
 linear_issue: CYB-542
 status: implementing
-updated: 2026-09-02
+updated: 2026-09-03
 implementation_branch: tianlei/cyb-542-qwen38-pi-computer-use
 last_live_smoke: 2026-08-31
 ---
@@ -156,7 +156,8 @@ Qwen agent directory therefore contains this checked-in `settings.json`:
     "enabled": true,
     "reserveTokens": 4096,
     "keepRecentTokens": 4096
-  }
+  },
+  "defaultTools": ["read", "bash", "edit", "write", "grep", "find", "ls"]
 }
 ```
 
@@ -172,6 +173,29 @@ final `stopReason: "length"`. Their pre-change `keepRecentTokens: 20000`
 prevented the compaction preparation step from finding older content to
 summarize. After changing these settings, use a new session when practical so
 large historical observations do not need to be recovered first.
+
+## Local filesystem capabilities
+
+Pi already provides local `read`, `write`, `edit`, and `bash` tools by
+default. The Qwen profile now makes that selection explicit and adds the
+structured `grep`, `find`, and `ls` tools:
+
+| Required capability | Local Pi tool | Status |
+| --- | --- | --- |
+| Read file content | `read` | enabled |
+| Create or replace a file | `write` | enabled |
+| Modify selected file content | `edit` | enabled |
+| Search file content | `grep` | enabled |
+| Search paths by glob | `find` | enabled |
+| List directory content | `ls` | enabled |
+| Run a local command | `bash` | preserved |
+
+These operations execute in the local Pi process. The remote Qwen service
+receives tool schemas and results but does not receive direct filesystem
+authority. The `computer_use` extension remains browser-scoped and registers
+only `computer_use`; it does not reimplement the built-in filesystem tools.
+CLI options such as `--tools`, `--exclude-tools`, `--no-tools`, and
+`--no-builtin-tools` take precedence over `settings.json`.
 
 ## Verified startup
 
@@ -381,9 +405,10 @@ not navigation authority and may use other origins. A live Baidu trace showed
 `https://wappass.baidu.com` as a main-frame intermediate navigation, so it must
 be explicitly allowlisted rather than treated as an embedded frame.
 
-The extension does not execute shell commands, arbitrary JavaScript, filesystem
-operations, or OS-wide mouse and keyboard input. Browser content and tool calls
-are treated as untrusted input.
+The `computer_use` extension does not execute shell commands, arbitrary
+JavaScript, filesystem operations, or OS-wide mouse and keyboard input. Local
+filesystem and shell access is supplied separately by Pi's built-in tools.
+Browser content and tool calls are treated as untrusted input.
 
 ## Implementation phases
 
@@ -423,7 +448,8 @@ the resulting local page state.
 ## Verification
 
 - Unit: coordinate scaling, origin validation, argument validation, sequential
-  tool registration, and text-only/optional-screenshot result shapes.
+  tool registration, configured local tool selection, and
+  text-only/optional-screenshot result shapes.
 - Browser integration: isolated Chrome starts, loads a loopback fixture, accepts
   a local click/type action, returns visible text with or without a screenshot,
   tolerates a slow page event, ignores cross-origin subframe loads for top-level
