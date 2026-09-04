@@ -13,6 +13,10 @@ import {
 } from "../examples/extensions/qwen-computer-use/browser-runtime.ts";
 import { loadComputerUseConfig } from "../examples/extensions/qwen-computer-use/config.ts";
 import {
+	createLocalBrowserInputHandler,
+	matchLocalBrowserCommand,
+} from "../examples/extensions/qwen-computer-use/local-commands.ts";
+import {
 	createComputerUseTool,
 	createInitialObservationMessage,
 	isManualVerificationDetails,
@@ -96,6 +100,211 @@ describe("qwen computer use contract", () => {
 		}
 	});
 
+	it("loads deterministic local browser command mappings", async () => {
+		const agentDir = await mkdtemp(join(tmpdir(), "pi-cua-config-test-"));
+		try {
+			await writeFile(
+				join(agentDir, "qwen-computer-use.json"),
+				JSON.stringify({
+					localCommands: {
+						sites: [
+							{
+								aliases: ["google", "谷歌"],
+								url: "https://www.google.com/",
+								search: {
+									url: "https://www.google.com/search?hl=zh-CN",
+									queryParameter: "q",
+								},
+							},
+						],
+					},
+				}),
+			);
+
+			expect(loadComputerUseConfig({ PI_CODING_AGENT_DIR: agentDir }).localCommands).toEqual({
+				sites: [
+					{
+						aliases: ["google", "谷歌"],
+						url: "https://www.google.com/",
+						search: {
+							url: "https://www.google.com/search?hl=zh-CN",
+							queryParameter: "q",
+						},
+					},
+				],
+			});
+		} finally {
+			await rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("maps configured open and search commands without a model", () => {
+		const localCommands = {
+			sites: [
+				{
+					aliases: ["google", "谷歌"],
+					url: "https://www.google.com/",
+					search: { url: "https://www.google.com/search?hl=zh-CN", queryParameter: "q" },
+				},
+				{
+					aliases: ["baidu", "百度"],
+					url: "https://www.baidu.com/",
+					search: { url: "https://www.baidu.com/s", queryParameter: "wd" },
+				},
+			],
+		};
+
+		expect(matchLocalBrowserCommand("打开谷歌", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/",
+		});
+		expect(matchLocalBrowserCommand("在 Google 搜索 pi agent", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/search?hl=zh-CN&q=pi+agent",
+		});
+		expect(matchLocalBrowserCommand("/search google TypeScript 5.9", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/search?hl=zh-CN&q=TypeScript+5.9",
+		});
+		expect(matchLocalBrowserCommand("谷歌一下 pi agent。", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/search?hl=zh-CN&q=pi+agent",
+		});
+		expect(matchLocalBrowserCommand("百度一下 TypeScript。", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.baidu.com/s?wd=TypeScript",
+		});
+		expect(matchLocalBrowserCommand("打开谷歌网站。", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/",
+		});
+		expect(matchLocalBrowserCommand("请帮我访问百度官网", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.baidu.com/",
+		});
+		expect(matchLocalBrowserCommand("帮我打开一下百度网页！", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.baidu.com/",
+		});
+		expect(matchLocalBrowserCommand("麻烦用百度查一下今天天气", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.baidu.com/s?wd=%E4%BB%8A%E5%A4%A9%E5%A4%A9%E6%B0%94",
+		});
+		expect(matchLocalBrowserCommand("在谷歌上搜 TypeScript", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/search?hl=zh-CN&q=TypeScript",
+		});
+		expect(matchLocalBrowserCommand("百度找附近餐厅", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.baidu.com/s?wd=%E9%99%84%E8%BF%91%E9%A4%90%E5%8E%85",
+		});
+		expect(matchLocalBrowserCommand("visit Google", localCommands)).toEqual({
+			action: "navigate",
+			url: "https://www.google.com/",
+		});
+		expect(matchLocalBrowserCommand("总结当前页面", localCommands)).toBeUndefined();
+		expect(matchLocalBrowserCommand("打开未配置网站。", localCommands)).toBeUndefined();
+	});
+
+	it("handles matched local commands even when browser execution fails", async () => {
+		const browser = new FakeBrowser();
+		const notifications: Array<{ message: string; level: string }> = [];
+		const handler = createLocalBrowserInputHandler(
+			{
+				sites: [{ aliases: ["example"], url: "https://example.com/" }],
+			},
+			async () => browser,
+		);
+		const ctx = {
+			isIdle: () => true,
+			ui: {
+				notify: (message: string, level: string) => notifications.push({ message, level }),
+			},
+		};
+
+		await expect(
+			handler({ type: "input", text: "/open example", source: "interactive" }, ctx as never),
+		).resolves.toEqual({ action: "handled" });
+		expect(browser.requests).toEqual([{ action: "navigate", url: "https://example.com/" }]);
+
+		browser.execute = async () => {
+			throw new Error("navigation failed");
+		};
+		await expect(
+			handler({ type: "input", text: "/open example", source: "interactive" }, ctx as never),
+		).resolves.toEqual({ action: "handled" });
+		expect(notifications.at(-1)).toEqual({
+			message: "Local browser command failed: navigation failed",
+			level: "error",
+		});
+	});
+
+	it("does not intercept local commands with images or while the agent is busy", async () => {
+		const browser = new FakeBrowser();
+		const handler = createLocalBrowserInputHandler(
+			{
+				sites: [{ aliases: ["example"], url: "https://example.com/" }],
+			},
+			async () => browser,
+		);
+		const ctx = {
+			isIdle: () => true,
+			ui: { notify: () => {} },
+		};
+
+		await expect(
+			handler(
+				{
+					type: "input",
+					text: "/open example",
+					source: "interactive",
+					images: [{ type: "image", data: "image", mimeType: "image/png" }],
+				},
+				ctx as never,
+			),
+		).resolves.toEqual({ action: "continue" });
+		ctx.isIdle = () => false;
+		await expect(
+			handler({ type: "input", text: "/open example", source: "interactive" }, ctx as never),
+		).resolves.toEqual({ action: "continue" });
+		expect(browser.requests).toEqual([]);
+	});
+
+	it("rejects unsafe or ambiguous local command mappings", async () => {
+		const agentDir = await mkdtemp(join(tmpdir(), "pi-cua-config-test-"));
+		try {
+			const configPath = join(agentDir, "qwen-computer-use.json");
+			await writeFile(
+				configPath,
+				JSON.stringify({
+					localCommands: {
+						sites: [
+							{ aliases: ["Google"], url: "https://www.google.com/" },
+							{ aliases: ["google"], url: "https://example.com/" },
+						],
+					},
+				}),
+			);
+			expect(() => loadComputerUseConfig({ PI_CODING_AGENT_DIR: agentDir })).toThrow(
+				"duplicate local command alias",
+			);
+
+			await writeFile(
+				configPath,
+				JSON.stringify({
+					localCommands: {
+						sites: [{ aliases: ["unsafe"], url: "https://user:password@example.com/" }],
+					},
+				}),
+			);
+			expect(() => loadComputerUseConfig({ PI_CODING_AGENT_DIR: agentDir })).toThrow(
+				"HTTP(S) URL without credentials",
+			);
+		} finally {
+			await rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
 	it("lets environment variables override the Computer Use config file", async () => {
 		const agentDir = await mkdtemp(join(tmpdir(), "pi-cua-config-test-"));
 		try {
@@ -156,6 +365,7 @@ describe("qwen computer use contract", () => {
 		expect(result.errors).toEqual([]);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0]?.tools.has("computer_use")).toBe(true);
+		expect(result.extensions[0]?.handlers.get("input")).toHaveLength(1);
 	});
 
 	it("scales normalized Qwen coordinates to the local CSS viewport", () => {

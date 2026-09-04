@@ -9,5 +9,25 @@
     "https://www.baidu.com",
     "https://wappass.baidu.com"
   ],
+  "localCommands": {
+    "sites": [
+      {
+        "aliases": ["google", "谷歌"],
+        "url": "https://www.google.com/",
+        "search": {
+          "url": "https://www.google.com/search?hl=zh-CN",
+          "queryParameter": "q"
+        }
+      },
+      {
+        "aliases": ["baidu", "百度"],
+        "url": "https://www.baidu.com/",
+        "search": {
+          "url": "https://www.baidu.com/s",
+          "queryParameter": "wd"
+        }
+      }
+    ]
+  },
   "headless": false
 }

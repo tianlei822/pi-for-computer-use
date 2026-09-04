@@ -279,6 +279,54 @@ Baidu and Google can still require verification based on their own risk
 controls. Use this directory for only one Pi browser at a time, do not commit
 it, and do not point `userDataDir` at the user's normal Chrome profile.
 
+## Local commands without a model
+
+Configure `localCommands.sites` to handle common navigation and search input
+inside the local extension before Pi starts an agent turn. The checked-in
+configuration maps Google and Baidu aliases. Supported forms include:
+
+```text
+/open google
+open baidu
+打开谷歌
+请帮我访问百度官网。
+/search google pi agent
+search baidu TypeScript
+在 Google 搜索 pi agent
+用百度搜索 TypeScript
+百度一下今天天气。
+麻烦用谷歌查一下 TypeScript
+```
+
+Each site entry has an exact alias list and navigation URL. An optional
+`search` object specifies the search endpoint and query parameter:
+
+```json
+{
+  "localCommands": {
+    "sites": [
+      {
+        "aliases": ["google", "谷歌"],
+        "url": "https://www.google.com/",
+        "search": {
+          "url": "https://www.google.com/search?hl=zh-CN",
+          "queryParameter": "q"
+        }
+      }
+    ]
+  }
+}
+```
+
+Local commands run only while the agent is idle and the input has no image
+attachments. Unknown or ambiguous input continues through the normal model
+flow. Once a local command matches, execution failures are reported locally
+instead of falling back to the model, avoiding duplicate navigation. All local
+URLs remain subject to `allowedOrigins`. A small built-in phrase dictionary
+covers common request prefixes, open/search synonyms, `一下`, site suffixes,
+and Chinese sentence punctuation. These rules are precompiled when the
+extension loads; site aliases still require an exact configured match.
+
 The `computer_use` tool intentionally excludes OS-wide input, arbitrary
 JavaScript, filesystem operations, shell commands, downloads, and automatic
 CAPTCHA handling. Local filesystem and shell access comes from Pi's separate

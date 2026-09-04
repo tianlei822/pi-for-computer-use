@@ -1,7 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ComputerUseBrowser } from "./browser-runtime.ts";
 import { ChromeCdpBrowser } from "./chrome-cdp-browser.ts";
-import { loadComputerUseConfig } from "./config.ts";
+import { type ComputerUseConfig, loadComputerUseConfig } from "./config.ts";
+import { createLocalBrowserInputHandler } from "./local-commands.ts";
 import {
 	createComputerUseTool,
 	createInitialObservationMessage,
@@ -9,8 +10,7 @@ import {
 	retainLatestComputerUseScreenshot,
 } from "./tool.ts";
 
-function createBrowser(): ComputerUseBrowser {
-	const config = loadComputerUseConfig();
+function createBrowser(config: ComputerUseConfig): ComputerUseBrowser {
 	return new ChromeCdpBrowser({
 		...(config.browserExecutable ? { executablePath: config.browserExecutable } : {}),
 		...(config.userDataDir ? { userDataDir: config.userDataDir } : {}),
@@ -22,13 +22,15 @@ function createBrowser(): ComputerUseBrowser {
 }
 
 export default function qwenComputerUse(pi: ExtensionAPI) {
+	const config = loadComputerUseConfig();
 	let browser: ComputerUseBrowser | undefined;
 	const getBrowser = async () => {
-		browser ??= createBrowser();
+		browser ??= createBrowser(config);
 		return browser;
 	};
 
 	pi.registerTool(createComputerUseTool(getBrowser));
+	pi.on("input", createLocalBrowserInputHandler(config.localCommands, getBrowser));
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "computer_use" && isManualVerificationDetails(event.details)) {
 			return { isError: true };
