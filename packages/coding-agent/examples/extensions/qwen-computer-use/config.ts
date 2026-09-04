@@ -24,7 +24,17 @@ export interface LocalSiteConfig {
 }
 
 export interface LocalCommandsConfig {
-	sites: LocalSiteConfig[];
+	sites?: LocalSiteConfig[];
+	macos?: LocalMacosCommandsConfig;
+}
+
+export interface LocalApplicationConfig {
+	aliases: string[];
+	bundleId: string;
+}
+
+export interface LocalMacosCommandsConfig {
+	applications: LocalApplicationConfig[];
 }
 
 const CONFIG_FILE_NAME = "qwen-computer-use.json";
@@ -37,9 +47,11 @@ const CONFIG_KEYS = new Set([
 	"headless",
 	"localCommands",
 ]);
-const LOCAL_COMMAND_KEYS = new Set(["sites"]);
+const LOCAL_COMMAND_KEYS = new Set(["sites", "macos"]);
 const LOCAL_SITE_KEYS = new Set(["aliases", "url", "search"]);
 const LOCAL_SEARCH_KEYS = new Set(["url", "queryParameter"]);
+const LOCAL_MACOS_KEYS = new Set(["applications"]);
+const LOCAL_APPLICATION_KEYS = new Set(["aliases", "bundleId"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,50 +99,94 @@ function parseLocalCommands(value: unknown): LocalCommandsConfig | undefined {
 	if (value === undefined) return undefined;
 	if (!isRecord(value)) throw new Error("localCommands must be an object");
 	assertKnownKeys(value, LOCAL_COMMAND_KEYS, "localCommands");
-	if (!Array.isArray(value.sites) || value.sites.length === 0) {
+	if (value.sites !== undefined && (!Array.isArray(value.sites) || value.sites.length === 0)) {
 		throw new Error("localCommands.sites must be a non-empty array");
 	}
 
 	const seenAliases = new Set<string>();
-	const sites = value.sites.map((siteValue, siteIndex): LocalSiteConfig => {
-		const field = `localCommands.sites[${siteIndex}]`;
-		if (!isRecord(siteValue)) throw new Error(`${field} must be an object`);
-		assertKnownKeys(siteValue, LOCAL_SITE_KEYS, field);
-		if (!Array.isArray(siteValue.aliases) || siteValue.aliases.length === 0) {
-			throw new Error(`${field}.aliases must be a non-empty array`);
+	const sites = Array.isArray(value.sites)
+		? value.sites.map((siteValue, siteIndex): LocalSiteConfig => {
+				const field = `localCommands.sites[${siteIndex}]`;
+				if (!isRecord(siteValue)) throw new Error(`${field} must be an object`);
+				assertKnownKeys(siteValue, LOCAL_SITE_KEYS, field);
+				if (!Array.isArray(siteValue.aliases) || siteValue.aliases.length === 0) {
+					throw new Error(`${field}.aliases must be a non-empty array`);
+				}
+				const aliases = siteValue.aliases.map((alias, aliasIndex) => {
+					if (typeof alias !== "string" || alias.trim().length === 0) {
+						throw new Error(`${field}.aliases[${aliasIndex}] must be a non-empty string`);
+					}
+					const normalizedAlias = alias.trim().toLocaleLowerCase();
+					if (seenAliases.has(normalizedAlias)) throw new Error(`duplicate local command alias: ${alias.trim()}`);
+					seenAliases.add(normalizedAlias);
+					return alias.trim();
+				});
+
+				let search: LocalSearchConfig | undefined;
+				if (siteValue.search !== undefined) {
+					if (!isRecord(siteValue.search)) throw new Error(`${field}.search must be an object`);
+					assertKnownKeys(siteValue.search, LOCAL_SEARCH_KEYS, `${field}.search`);
+					const queryParameter = parseOptionalString(
+						siteValue.search.queryParameter,
+						`${field}.search.queryParameter`,
+					);
+					if (!queryParameter || !/^[A-Za-z0-9_.~-]+$/.test(queryParameter)) {
+						throw new Error(`${field}.search.queryParameter must be a URL query parameter name`);
+					}
+					search = {
+						url: parseWebUrl(siteValue.search.url, `${field}.search.url`),
+						queryParameter,
+					};
+				}
+
+				return {
+					aliases,
+					url: parseWebUrl(siteValue.url, `${field}.url`),
+					...(search ? { search } : {}),
+				};
+			})
+		: undefined;
+
+	let macos: LocalMacosCommandsConfig | undefined;
+	if (value.macos !== undefined) {
+		if (!isRecord(value.macos)) throw new Error("localCommands.macos must be an object");
+		assertKnownKeys(value.macos, LOCAL_MACOS_KEYS, "localCommands.macos");
+		if (!Array.isArray(value.macos.applications) || value.macos.applications.length === 0) {
+			throw new Error("localCommands.macos.applications must be a non-empty array");
 		}
-		const aliases = siteValue.aliases.map((alias, aliasIndex) => {
-			if (typeof alias !== "string" || alias.trim().length === 0) {
-				throw new Error(`${field}.aliases[${aliasIndex}] must be a non-empty string`);
+		const seenApplicationAliases = new Set<string>();
+		const applications = value.macos.applications.map((applicationValue, applicationIndex) => {
+			const field = `localCommands.macos.applications[${applicationIndex}]`;
+			if (!isRecord(applicationValue)) throw new Error(`${field} must be an object`);
+			assertKnownKeys(applicationValue, LOCAL_APPLICATION_KEYS, field);
+			if (!Array.isArray(applicationValue.aliases) || applicationValue.aliases.length === 0) {
+				throw new Error(`${field}.aliases must be a non-empty array`);
 			}
-			const normalizedAlias = alias.trim().toLocaleLowerCase();
-			if (seenAliases.has(normalizedAlias)) throw new Error(`duplicate local command alias: ${alias.trim()}`);
-			seenAliases.add(normalizedAlias);
-			return alias.trim();
+			const aliases = applicationValue.aliases.map((alias, aliasIndex) => {
+				if (typeof alias !== "string" || alias.trim().length === 0) {
+					throw new Error(`${field}.aliases[${aliasIndex}] must be a non-empty string`);
+				}
+				const normalizedAlias = alias.trim().toLocaleLowerCase();
+				if (seenApplicationAliases.has(normalizedAlias)) {
+					throw new Error(`duplicate local application alias: ${alias.trim()}`);
+				}
+				seenApplicationAliases.add(normalizedAlias);
+				return alias.trim();
+			});
+			const bundleId = parseOptionalString(applicationValue.bundleId, `${field}.bundleId`);
+			if (!bundleId || !/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(bundleId)) {
+				throw new Error(`${field}.bundleId must be a valid application bundle identifier`);
+			}
+			return { aliases, bundleId };
 		});
+		macos = { applications };
+	}
 
-		let search: LocalSearchConfig | undefined;
-		if (siteValue.search !== undefined) {
-			if (!isRecord(siteValue.search)) throw new Error(`${field}.search must be an object`);
-			assertKnownKeys(siteValue.search, LOCAL_SEARCH_KEYS, `${field}.search`);
-			const queryParameter = parseOptionalString(siteValue.search.queryParameter, `${field}.search.queryParameter`);
-			if (!queryParameter || !/^[A-Za-z0-9_.~-]+$/.test(queryParameter)) {
-				throw new Error(`${field}.search.queryParameter must be a URL query parameter name`);
-			}
-			search = {
-				url: parseWebUrl(siteValue.search.url, `${field}.search.url`),
-				queryParameter,
-			};
-		}
-
-		return {
-			aliases,
-			url: parseWebUrl(siteValue.url, `${field}.url`),
-			...(search ? { search } : {}),
-		};
-	});
-
-	return { sites };
+	if (!sites && !macos) throw new Error("localCommands must configure sites or macos");
+	return {
+		...(sites ? { sites } : {}),
+		...(macos ? { macos } : {}),
+	};
 }
 
 function parseConfigFile(path: string, required: boolean): ComputerUseConfig {

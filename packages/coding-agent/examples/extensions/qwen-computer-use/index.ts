@@ -3,6 +3,7 @@ import type { ComputerUseBrowser } from "./browser-runtime.ts";
 import { ChromeCdpBrowser } from "./chrome-cdp-browser.ts";
 import { type ComputerUseConfig, loadComputerUseConfig } from "./config.ts";
 import { createLocalBrowserInputHandler } from "./local-commands.ts";
+import { createLocalMacosInputHandler, createMacosSystemExecutor } from "./local-macos-commands.ts";
 import {
 	createComputerUseTool,
 	createInitialObservationMessage,
@@ -31,6 +32,9 @@ export default function qwenComputerUse(pi: ExtensionAPI) {
 
 	pi.registerTool(createComputerUseTool(getBrowser));
 	pi.on("input", createLocalBrowserInputHandler(config.localCommands, getBrowser));
+	if (process.platform === "darwin") {
+		pi.on("input", createLocalMacosInputHandler(config.localCommands?.macos, createMacosSystemExecutor(pi.exec)));
+	}
 	pi.on("tool_result", (event) => {
 		if (event.toolName === "computer_use" && isManualVerificationDetails(event.details)) {
 			return { isError: true };

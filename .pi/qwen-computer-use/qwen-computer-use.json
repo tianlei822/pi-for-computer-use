@@ -27,7 +27,31 @@
           "queryParameter": "wd"
         }
       }
-    ]
+    ],
+    "macos": {
+      "applications": [
+        {
+          "aliases": ["chrome", "google chrome", "谷歌浏览器"],
+          "bundleId": "com.google.Chrome"
+        },
+        {
+          "aliases": ["finder", "访达"],
+          "bundleId": "com.apple.finder"
+        },
+        {
+          "aliases": ["terminal", "终端"],
+          "bundleId": "com.apple.Terminal"
+        },
+        {
+          "aliases": ["iterm", "iterm2"],
+          "bundleId": "com.googlecode.iterm2"
+        },
+        {
+          "aliases": ["vscode", "vs code", "visual studio code"],
+          "bundleId": "com.microsoft.VSCode"
+        }
+      ]
+    }
   },
   "headless": false
 }

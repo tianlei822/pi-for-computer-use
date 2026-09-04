@@ -17,6 +17,11 @@ import {
 	matchLocalBrowserCommand,
 } from "../examples/extensions/qwen-computer-use/local-commands.ts";
 import {
+	createLocalMacosInputHandler,
+	createMacosSystemExecutor,
+	matchLocalMacosCommand,
+} from "../examples/extensions/qwen-computer-use/local-macos-commands.ts";
+import {
 	createComputerUseTool,
 	createInitialObservationMessage,
 	isManualVerificationDetails,
@@ -132,6 +137,40 @@ describe("qwen computer use contract", () => {
 						},
 					},
 				],
+			});
+		} finally {
+			await rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("loads allowlisted local macOS application mappings", async () => {
+		const agentDir = await mkdtemp(join(tmpdir(), "pi-cua-config-test-"));
+		try {
+			await writeFile(
+				join(agentDir, "qwen-computer-use.json"),
+				JSON.stringify({
+					localCommands: {
+						macos: {
+							applications: [
+								{
+									aliases: ["chrome", "谷歌浏览器"],
+									bundleId: "com.google.Chrome",
+								},
+							],
+						},
+					},
+				}),
+			);
+
+			expect(loadComputerUseConfig({ PI_CODING_AGENT_DIR: agentDir }).localCommands).toEqual({
+				macos: {
+					applications: [
+						{
+							aliases: ["chrome", "谷歌浏览器"],
+							bundleId: "com.google.Chrome",
+						},
+					],
+				},
 			});
 		} finally {
 			await rm(agentDir, { recursive: true, force: true });
@@ -305,6 +344,116 @@ describe("qwen computer use contract", () => {
 		}
 	});
 
+	it("matches focused input, application, and window commands locally", () => {
+		const macos = {
+			applications: [
+				{ aliases: ["chrome", "谷歌浏览器"], bundleId: "com.google.Chrome" },
+				{ aliases: ["finder", "访达"], bundleId: "com.apple.finder" },
+			],
+		};
+
+		expect(matchLocalMacosCommand("把当前输入框改成 你好。", macos)).toEqual({
+			action: "replace_focused_input",
+			text: "你好。",
+		});
+		expect(matchLocalMacosCommand("修改当前输入为 new value", macos)).toEqual({
+			action: "replace_focused_input",
+			text: "new value",
+		});
+		expect(matchLocalMacosCommand("在当前输入框输入 test", macos)).toEqual({
+			action: "insert_focused_input",
+			text: "test",
+		});
+		expect(matchLocalMacosCommand("清空当前输入框。", macos)).toEqual({ action: "clear_focused_input" });
+		expect(matchLocalMacosCommand("请清除焦点输入内容", macos)).toEqual({ action: "clear_focused_input" });
+		expect(matchLocalMacosCommand("切换到谷歌浏览器。", macos)).toEqual({
+			action: "activate_application",
+			bundleId: "com.google.Chrome",
+		});
+		expect(matchLocalMacosCommand("回到访达", macos)).toEqual({
+			action: "activate_application",
+			bundleId: "com.apple.finder",
+		});
+		expect(matchLocalMacosCommand("切换到下一个窗口", macos)).toEqual({
+			action: "cycle_window",
+			direction: "next",
+		});
+		expect(matchLocalMacosCommand("帮我切换到下一个窗口", macos)).toEqual({
+			action: "cycle_window",
+			direction: "next",
+		});
+		expect(matchLocalMacosCommand("上一个窗口", macos)).toEqual({
+			action: "cycle_window",
+			direction: "previous",
+		});
+		expect(matchLocalMacosCommand("修改代码里的输入", macos)).toBeUndefined();
+	});
+
+	it("passes focused text as an osascript argument instead of script source", async () => {
+		const calls: Array<{ command: string; args: string[]; timeout?: number }> = [];
+		const executor = createMacosSystemExecutor(async (command, args, options) => {
+			calls.push({ command, args, timeout: options?.timeout });
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		}, "darwin");
+		const text = 'hello "$(touch /tmp/should-not-run)"';
+
+		await executor({ action: "replace_focused_input", text });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.command).toBe("osascript");
+		expect(calls[0]?.args.at(-1)).toBe(text);
+		expect(calls[0]?.args.slice(0, -1).join("\n")).not.toContain(text);
+		expect(calls[0]?.timeout).toBe(5000);
+	});
+
+	it("rejects invalid local macOS application bundle identifiers", async () => {
+		const agentDir = await mkdtemp(join(tmpdir(), "pi-cua-config-test-"));
+		try {
+			await writeFile(
+				join(agentDir, "qwen-computer-use.json"),
+				JSON.stringify({
+					localCommands: {
+						macos: {
+							applications: [{ aliases: ["unsafe"], bundleId: "../../Applications/Other.app" }],
+						},
+					},
+				}),
+			);
+			expect(() => loadComputerUseConfig({ PI_CODING_AGENT_DIR: agentDir })).toThrow(
+				"valid application bundle identifier",
+			);
+		} finally {
+			await rm(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("executes application switching without a shell and keeps matched failures local", async () => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const executor = createMacosSystemExecutor(async (command, args) => {
+			calls.push({ command, args });
+			return { stdout: "", stderr: "", code: 0, killed: false };
+		}, "darwin");
+		await executor({ action: "activate_application", bundleId: "com.google.Chrome" });
+		expect(calls).toEqual([{ command: "open", args: ["-b", "com.google.Chrome"] }]);
+
+		const notifications: Array<{ message: string; level: string }> = [];
+		const handler = createLocalMacosInputHandler(
+			{
+				applications: [{ aliases: ["chrome"], bundleId: "com.google.Chrome" }],
+			},
+			async () => {
+				throw new Error("Accessibility permission is required");
+			},
+		);
+		const result = await handler({ type: "input", text: "切换到 Chrome", source: "interactive" }, {
+			isIdle: () => true,
+			ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+		} as never);
+		expect(result).toEqual({ action: "handled" });
+		expect(notifications).toEqual([
+			{ message: "Local macOS command failed: Accessibility permission is required", level: "error" },
+		]);
+	});
+
 	it("lets environment variables override the Computer Use config file", async () => {
 		const agentDir = await mkdtemp(join(tmpdir(), "pi-cua-config-test-"));
 		try {
@@ -365,7 +514,7 @@ describe("qwen computer use contract", () => {
 		expect(result.errors).toEqual([]);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0]?.tools.has("computer_use")).toBe(true);
-		expect(result.extensions[0]?.handlers.get("input")).toHaveLength(1);
+		expect(result.extensions[0]?.handlers.get("input")).toHaveLength(process.platform === "darwin" ? 2 : 1);
 	});
 
 	it("scales normalized Qwen coordinates to the local CSS viewport", () => {

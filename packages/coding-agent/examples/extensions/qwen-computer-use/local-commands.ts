@@ -40,7 +40,7 @@ export function createLocalBrowserCommandMatcher(
 	const siteSuffix = dictionaryPattern(LOCAL_COMMAND_DICTIONARY.siteSuffixes);
 	const openRules: Array<{ pattern: RegExp; site: LocalSiteConfig }> = [];
 	const searchRules: Array<{ pattern: RegExp; site: LocalSiteConfig }> = [];
-	const aliases = config.sites
+	const aliases = (config.sites ?? [])
 		.flatMap((site) => site.aliases.map((alias) => ({ alias, site })))
 		.sort((left, right) => right.alias.length - left.alias.length);
 

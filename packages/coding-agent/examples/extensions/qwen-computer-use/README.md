@@ -254,6 +254,7 @@ through a private tunnel. Use a real credential for a gateway.
 | `sendScreenshots` | `PI_CUA_SEND_SCREENSHOTS` | Attach JPEG screenshots to model observations | `true` |
 | `startUrl` | `PI_CUA_START_URL` | Initial local page | `about:blank` |
 | `allowedOrigins` | `PI_CUA_ALLOWED_ORIGINS` | Exact origins allowed for top-level navigation; the environment form is comma-separated | loopback HTTP origins |
+| `localCommands` | — | Local site and opt-in macOS command mappings | disabled |
 | `headless` | `PI_CUA_HEADLESS` | `true`/`1` for headless Chrome | `false` |
 
 Unknown JSON keys and invalid value types stop startup with a configuration
@@ -327,8 +328,43 @@ covers common request prefixes, open/search synonyms, `一下`, site suffixes,
 and Chinese sentence punctuation. These rules are precompiled when the
 extension loads; site aliases still require an exact configured match.
 
-The `computer_use` tool intentionally excludes OS-wide input, arbitrary
+### Local macOS commands
+
+Adding `localCommands.macos` enables deterministic system actions on macOS.
+Application switching is restricted to configured bundle identifiers. Focused
+input and window cycling use a fixed AppleScript passed directly to
+`osascript`; user text is supplied only as a process argument and is never
+inserted into script source or a shell command.
+
+```text
+切换到 Chrome
+回到访达
+切换到下一个窗口
+上一个窗口
+在当前输入框输入 hello
+把当前输入框改成 你好
+清空当前输入框
+```
+
+The input actions operate on the accessibility-focused element of the
+frontmost application. Replacement requires a writable `AXValue`; insertion
+requires a writable `AXSelectedText`. Unsupported controls fail locally and do
+not fall back to the model. When the command is submitted from the Pi TUI, the
+terminal hosting Pi may be the frontmost application; RPC or another
+background input source is required when a different application must retain
+focus.
+
+macOS requires explicit permission for UI scripting. Grant Accessibility
+permission to the application hosting Pi and allow its Automation access to
+System Events in **System Settings > Privacy & Security**. See Apple's
+[Accessibility permission guide](https://support.apple.com/guide/mac-help/mh43185/mac),
+[Automation permission guide](https://support.apple.com/guide/mac-help/mchl108e1718/mac),
+and
+[Accessibility API reference](https://developer.apple.com/documentation/applicationservices/1462085-axuielementcopyattributevalue).
+
+The `computer_use` tool itself remains browser-scoped and excludes arbitrary
 JavaScript, filesystem operations, shell commands, downloads, and automatic
-CAPTCHA handling. Local filesystem and shell access comes from Pi's separate
-built-in tools configured in `settings.json`. Browser page content and
-model-produced tool arguments are untrusted data.
+CAPTCHA handling. The opt-in macOS input handler is separate from that tool.
+Local filesystem and shell access comes from Pi's built-in tools configured in
+`settings.json`. Browser page content and model-produced tool arguments are
+untrusted data.
