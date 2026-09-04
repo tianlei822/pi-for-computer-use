@@ -212,6 +212,116 @@ describe("qwen computer use contract", () => {
 		]);
 	});
 
+	it("normalizes migrated Browser Use actions before execution", async () => {
+		const browser = new FakeBrowser();
+		const tool = createComputerUseTool(async () => browser);
+		const calls = [
+			{ action: "go_back" as const },
+			{ action: "close_page" as const, pageId: "page-2" },
+			{ action: "wait" as const, seconds: 2 },
+			{ action: "find_text" as const, text: "needle" },
+			{ action: "search_page" as const, pattern: "price" },
+			{ action: "find_elements" as const, selector: "a.result", attributes: ["href"] },
+			{ action: "click_element" as const, index: 4 },
+			{ action: "input_element" as const, index: 5, text: "hello" },
+			{ action: "select_dropdown" as const, index: 6, text: "Option B" },
+		];
+
+		for (const [index, params] of calls.entries()) {
+			await tool.execute(`migrated-${index}`, params, undefined, undefined, {} as never);
+		}
+
+		expect(browser.requests).toEqual([
+			{ action: "go_back" },
+			{ action: "close_page", pageId: "page-2" },
+			{ action: "wait", seconds: 2 },
+			{ action: "find_text", text: "needle" },
+			{
+				action: "search_page",
+				pattern: "price",
+				regex: false,
+				caseSensitive: false,
+				contextChars: 150,
+				maxResults: 25,
+			},
+			{
+				action: "find_elements",
+				selector: "a.result",
+				attributes: ["href"],
+				includeText: true,
+				maxResults: 50,
+			},
+			{ action: "click_element", index: 4 },
+			{ action: "input_element", index: 5, text: "hello", clear: true },
+			{ action: "select_dropdown", index: 6, text: "Option B" },
+		]);
+	});
+
+	it("returns indexed elements, page metrics, browser events, and action data", async () => {
+		const browser = new FakeBrowser();
+		browser.execute = async (request) => {
+			browser.requests.push(request);
+			return {
+				...textOnlyObservation,
+				interactiveElements: [
+					{
+						index: 7,
+						role: "button",
+						name: "Submit",
+						bounds: { x: 10, y: 20, width: 80, height: 30 },
+					},
+				],
+				pageInfo: {
+					scrollX: 0,
+					scrollY: 720,
+					contentWidth: 1280,
+					contentHeight: 2160,
+					pagesAbove: 1,
+					pagesBelow: 1,
+				},
+				recentEvents: ["Opened a new tab"],
+				actionResult: { type: "find_text", found: true, text: "needle" },
+			};
+		};
+		const tool = createComputerUseTool(async () => browser);
+
+		const result = await tool.execute(
+			"rich-observation",
+			{ action: "find_text", text: "needle" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		const payload = JSON.parse(result.content[0]?.type === "text" ? result.content[0].text : "{}");
+
+		expect(payload).toMatchObject({
+			interactiveElements: [{ index: 7, role: "button", name: "Submit" }],
+			pageInfo: { pagesAbove: 1, pagesBelow: 1 },
+			recentEvents: ["Opened a new tab"],
+			actionResult: { type: "find_text", found: true, text: "needle" },
+		});
+	});
+
+	it("warns when the same action leaves the browser state unchanged", async () => {
+		const browser = new FakeBrowser();
+		const tool = createComputerUseTool(async () => browser);
+		let payload: Record<string, unknown> = {};
+
+		for (let index = 0; index < 5; index++) {
+			const result = await tool.execute(
+				`stalled-${index}`,
+				{ action: "scroll", direction: "down", amount: 500 },
+				undefined,
+				undefined,
+				{} as never,
+			);
+			payload = JSON.parse(result.content[0]?.type === "text" ? result.content[0].text : "{}");
+		}
+
+		expect(payload.progressWarning).toContain("repeated");
+		expect(payload.progressWarning).toContain("browser state has not changed");
+	});
+
 	it("rejects incomplete actions before they reach the browser", async () => {
 		const browser = new FakeBrowser();
 		const tool = createComputerUseTool(async () => browser);
@@ -220,6 +330,12 @@ describe("qwen computer use contract", () => {
 			"coordinate",
 		);
 		expect(browser.requests).toEqual([]);
+		await expect(
+			tool.execute("call-3", { action: "click_element" }, undefined, undefined, {} as never),
+		).rejects.toThrow("index");
+		await expect(
+			tool.execute("call-4", { action: "find_elements" }, undefined, undefined, {} as never),
+		).rejects.toThrow("selector");
 	});
 
 	it("detects Baidu and Google manual verification pages", () => {

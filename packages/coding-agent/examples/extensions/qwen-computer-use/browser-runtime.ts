@@ -12,6 +12,31 @@ export interface BrowserPageSummary {
 	isActive: boolean;
 }
 
+export interface BrowserElementBounds {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export interface BrowserInteractiveElement {
+	index: number;
+	role: string;
+	name: string;
+	value?: string;
+	disabled?: boolean;
+	bounds: BrowserElementBounds;
+}
+
+export interface BrowserPageInfo {
+	scrollX: number;
+	scrollY: number;
+	contentWidth: number;
+	contentHeight: number;
+	pagesAbove: number;
+	pagesBelow: number;
+}
+
 export interface BrowserObservation {
 	pageId: string;
 	title: string;
@@ -20,13 +45,39 @@ export interface BrowserObservation {
 	text: string;
 	screenshot?: string;
 	pages?: BrowserPageSummary[];
+	interactiveElements?: BrowserInteractiveElement[];
+	pageInfo?: BrowserPageInfo;
+	recentEvents?: string[];
+	actionResult?: Record<string, unknown>;
 }
 
 export type ComputerUseRequest =
 	| { action: "screenshot" }
 	| { action: "list_pages" }
 	| { action: "switch_page"; pageId: string }
+	| { action: "close_page"; pageId?: string }
 	| { action: "navigate"; url: string }
+	| { action: "go_back" }
+	| { action: "wait"; seconds: number }
+	| { action: "find_text"; text: string }
+	| {
+			action: "search_page";
+			pattern: string;
+			regex: boolean;
+			caseSensitive: boolean;
+			contextChars: number;
+			maxResults: number;
+	  }
+	| {
+			action: "find_elements";
+			selector: string;
+			attributes: string[];
+			includeText: boolean;
+			maxResults: number;
+	  }
+	| { action: "click_element"; index: number }
+	| { action: "input_element"; index: number; text: string; clear: boolean }
+	| { action: "select_dropdown"; index: number; text: string }
 	| { action: "left_click" | "double_click"; coordinate: NormalizedCoordinate }
 	| { action: "type"; text: string }
 	| { action: "key"; keys: string[] }

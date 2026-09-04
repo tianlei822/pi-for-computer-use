@@ -6,9 +6,9 @@ selected model can run on a remote OpenAI-compatible server.
 It launches an isolated local Chrome profile, injects the current page
 observation before each user turn, exposes a sequential `computer_use` tool,
 and returns a fresh observation after every action. Observations always include
-visible page text and can optionally include a screenshot. The extension never
-sends model requests directly; Pi's selected provider owns the remote HTTP
-conversation.
+visible page text, page metrics, and indexed visible controls, and can
+optionally include a screenshot. The extension never sends model requests
+directly; Pi's selected provider owns the remote HTTP conversation.
 
 ## Project-local configuration
 
@@ -138,6 +138,33 @@ override values from the JSON file.
 - `PI_CUA_SEND_SCREENSHOTS=true|false`: override the JSON value for the current
   process.
 
+## Browser actions and observations
+
+The tool supports coordinate input plus indexed controls derived from Chrome's
+Accessibility tree. Prefer the indexed actions when the target appears in
+`interactiveElements`; their numeric indexes remain stable while the underlying
+DOM nodes remain present.
+
+- Page control: `navigate`, `go_back`, `wait`, `list_pages`, `switch_page`, and
+  `close_page`.
+- Page inspection: `screenshot`, `search_page`, `find_text`, and
+  `find_elements`.
+- Indexed controls: `click_element`, `input_element`, and `select_dropdown`.
+- Coordinate controls: `left_click`, `double_click`, `type`, `key`, and
+  `scroll`.
+
+Each result can include `pageInfo` scroll/content metrics,
+`interactiveElements`, `recentEvents`, and an action-specific `actionResult`.
+New tabs are selected automatically, JavaScript dialogs are dismissed and
+reported, and repeated actions against an unchanged page return a progress
+warning.
+
+These capabilities adapt browser-control patterns reviewed in
+[`browser-use/browser-use`](https://github.com/browser-use/browser-use) to the
+existing local TypeScript/CDP runtime. The extension does not add a runtime
+dependency on browser-use or replace Pi's agent, model, session, or filesystem
+layers.
+
 ## Screenshot transport and retention
 
 When screenshots are enabled, Chrome CDP captures a JPEG and returns its Base64
@@ -234,7 +261,7 @@ error so a misspelled allowlist cannot silently weaken or block navigation.
 Visible page text is capped at 12,000 characters per observation. With
 `sendScreenshots: false`, the `screenshot` action returns text metadata without
 an image; coordinate clicks are less reliable without visual grounding, so
-prefer `navigate`, `type`, `key`, and `scroll`.
+prefer indexed controls and page inspection actions.
 The allowlist applies to the selected page's top-level navigation, not embedded
 frames or other page resources. A live Baidu search showed
 `https://wappass.baidu.com` as a main-frame intermediate navigation, so the

@@ -6,7 +6,10 @@ import { join } from "node:path";
 import {
 	assertAllowedNavigation,
 	assertAllowedPageTarget,
+	type BrowserElementBounds,
+	type BrowserInteractiveElement,
 	type BrowserObservation,
+	type BrowserPageInfo,
 	type BrowserPageSummary,
 	type BrowserViewport,
 	type ComputerUseBrowser,
@@ -40,6 +43,11 @@ interface PendingRequest {
 	abortHandler?: () => void;
 }
 
+interface InteractiveElementHandle {
+	targetId: string;
+	backendNodeId: number;
+}
+
 type CdpEventHandler = (params: unknown) => void;
 
 class CdpEventTimeoutError extends Error {
@@ -57,6 +65,24 @@ const DEFAULT_ACTION_DELAY_MS = 300;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_WINDOW_SIZE = "1280,720";
 const MAX_PAGE_TEXT_CHARS = 12_000;
+const MAX_INTERACTIVE_ELEMENTS = 100;
+const INTERACTIVE_ROLES = new Set([
+	"button",
+	"checkbox",
+	"combobox",
+	"link",
+	"listbox",
+	"menuitem",
+	"option",
+	"radio",
+	"searchbox",
+	"slider",
+	"spinbutton",
+	"switch",
+	"tab",
+	"textbox",
+	"treeitem",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -77,6 +103,22 @@ function requirePositiveNumber(value: unknown, label: string): number {
 		throw new Error(`${label} must be a positive number`);
 	}
 	return value;
+}
+
+function requireFiniteNumber(value: unknown, label: string): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number`);
+	return value;
+}
+
+function readRemoteValue(response: unknown, label: string): unknown {
+	const evaluated = requireRecord(response, `${label} result`);
+	if (evaluated.exceptionDetails !== undefined) throw new Error(`${label} failed`);
+	return requireRecord(evaluated.result, `${label} remote result`).value;
+}
+
+function readAxValue(value: unknown): string | undefined {
+	if (!isRecord(value)) return undefined;
+	return typeof value.value === "string" ? value.value : undefined;
 }
 
 function sleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
@@ -297,6 +339,10 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 	private endpoint: string | undefined;
 	private selectedPageId: string | undefined;
 	private starting: Promise<void> | undefined;
+	private readonly currentInteractiveElements = new Map<number, InteractiveElementHandle>();
+	private readonly elementIndexByNode = new Map<string, number>();
+	private nextElementIndex = 1;
+	private readonly recentEvents: string[] = [];
 
 	constructor(options: ChromeCdpBrowserOptions = {}) {
 		this.executablePath = options.executablePath;
@@ -322,6 +368,11 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 		await this.ensureStarted(signal);
 
 		if (request.action === "screenshot" || request.action === "list_pages") return this.observe(signal);
+		if (request.action === "wait") {
+			await sleep(request.seconds * 1000, signal);
+			return this.observeWithActionResult({ type: "wait", seconds: request.seconds }, signal);
+		}
+		if (request.action === "close_page") return this.closePage(request.pageId, signal);
 		if (request.action === "switch_page") {
 			const targets = await this.listTargets(signal);
 			const target = targets.find((candidate) => candidate.id === request.pageId);
@@ -329,21 +380,97 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 			assertAllowedPageTarget(target.url, this.allowedOrigins);
 			await this.withClient(target, signal, (client) => client.send("Page.bringToFront", {}, signal));
 			this.selectedPageId = target.id;
+			this.pushRecentEvent(`Switched to page: ${target.title || target.url}`);
 			return this.observe(signal);
 		}
 
 		const targets = await this.listTargets(signal);
 		const target = this.selectTarget(targets);
 		assertAllowedPageTarget(target.url, this.allowedOrigins);
+		let actionResult: Record<string, unknown> | undefined;
 		await this.withClient(target, signal, async (client) => {
 			if (request.action === "navigate") {
 				const url = assertAllowedNavigation(request.url, this.allowedOrigins);
 				await this.navigate(client, url, signal);
 				return;
 			}
+			if (request.action === "go_back") {
+				const history = requireRecord(
+					await client.send("Page.getNavigationHistory", {}, signal),
+					"navigation history",
+				);
+				const currentIndex = requireFiniteNumber(history.currentIndex, "navigation history currentIndex");
+				const entries = Array.isArray(history.entries) ? history.entries : [];
+				const previous =
+					currentIndex > 0 ? requireRecord(entries[currentIndex - 1], "previous history entry") : undefined;
+				if (!previous) {
+					actionResult = { type: "go_back", navigated: false };
+					return;
+				}
+				const entryId = requireFiniteNumber(previous.id, "previous history entry id");
+				await this.withNavigationGuard(
+					client,
+					() => client.send("Page.navigateToHistoryEntry", { entryId }, signal).then(() => undefined),
+					true,
+					signal,
+				);
+				actionResult = { type: "go_back", navigated: true };
+				return;
+			}
+			if (request.action === "search_page") {
+				actionResult = await this.searchPage(client, request, signal);
+				return;
+			}
+			if (request.action === "find_elements") {
+				actionResult = await this.findElements(client, request, signal);
+				return;
+			}
+			if (request.action === "find_text") {
+				actionResult = await this.findText(client, request.text, signal);
+				await sleep(this.actionDelayMs, signal);
+				return;
+			}
 			await this.withNavigationGuard(
 				client,
 				async () => {
+					if (request.action === "click_element") {
+						await this.clickInteractiveElement(client, target, request.index, signal);
+						return;
+					}
+					if (request.action === "input_element") {
+						const element = this.requireInteractiveElement(target, request.index);
+						await client.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: element.backendNodeId }, signal);
+						await client.send("DOM.focus", { backendNodeId: element.backendNodeId }, signal);
+						if (request.clear) {
+							const resolved = requireRecord(
+								await client.send("DOM.resolveNode", { backendNodeId: element.backendNodeId }, signal),
+								"DOM.resolveNode result",
+							);
+							const objectId = requireString(
+								requireRecord(resolved.object, "resolved DOM object").objectId,
+								"DOM objectId",
+							);
+							await client.send(
+								"Runtime.callFunctionOn",
+								{
+									objectId,
+									functionDeclaration: `function () {
+										if ("value" in this) this.value = "";
+										else this.textContent = "";
+										this.dispatchEvent(new Event("input", { bubbles: true }));
+									}`,
+									returnByValue: true,
+								},
+								signal,
+							);
+						}
+						await client.send("Input.insertText", { text: request.text }, signal);
+						return;
+					}
+					if (request.action === "select_dropdown") {
+						actionResult = await this.selectDropdown(client, target, request.index, request.text, signal);
+						return;
+					}
 					if (request.action === "type") {
 						await client.send("Input.insertText", { text: request.text }, signal);
 						return;
@@ -394,7 +521,13 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 
 		const finalTargets = await this.listTargets(signal);
 		for (const candidate of finalTargets) assertAllowedPageTarget(candidate.url, this.allowedOrigins);
-		return this.observe(signal);
+		const previousTargetIds = new Set(targets.map((candidate) => candidate.id));
+		const openedTarget = finalTargets.find((candidate) => !previousTargetIds.has(candidate.id));
+		if (openedTarget) {
+			this.selectedPageId = openedTarget.id;
+			this.pushRecentEvent(`Opened a new page: ${openedTarget.title || openedTarget.url}`);
+		}
+		return actionResult ? this.observeWithActionResult(actionResult, signal) : this.observe(signal);
 	}
 
 	async close(): Promise<void> {
@@ -402,6 +535,10 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 		this.process = undefined;
 		this.endpoint = undefined;
 		this.selectedPageId = undefined;
+		this.currentInteractiveElements.clear();
+		this.elementIndexByNode.clear();
+		this.nextElementIndex = 1;
+		this.recentEvents.length = 0;
 		if (child && child.exitCode === null) {
 			child.kill("SIGTERM");
 			await Promise.race([
@@ -562,20 +699,322 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 		return selected;
 	}
 
+	private async observeWithActionResult(
+		actionResult: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<BrowserObservation> {
+		return { ...(await this.observe(signal)), actionResult };
+	}
+
+	private pushRecentEvent(event: string): void {
+		this.recentEvents.push(event);
+		if (this.recentEvents.length > 10) this.recentEvents.shift();
+	}
+
+	private async closePage(pageId: string | undefined, signal?: AbortSignal): Promise<BrowserObservation> {
+		if (!this.endpoint) throw new Error("Chrome is not started");
+		const targets = await this.listTargets(signal);
+		if (targets.length <= 1) throw new Error("cannot close the last browser page");
+		const target = pageId ? targets.find((candidate) => candidate.id === pageId) : this.selectTarget(targets);
+		if (!target) throw new Error(`unknown pageId: ${pageId}`);
+		const response = await fetch(`${this.endpoint}/json/close/${encodeURIComponent(target.id)}`, {
+			method: "PUT",
+			signal: requestSignal(signal, this.requestTimeoutMs),
+		});
+		if (!response.ok) throw new Error(`Chrome failed to close page ${target.id}: HTTP ${response.status}`);
+		const deadline = Date.now() + this.requestTimeoutMs;
+		let remaining = targets;
+		while (Date.now() < deadline) {
+			remaining = await this.listTargets(signal);
+			if (!remaining.some((candidate) => candidate.id === target.id)) break;
+			await sleep(50, signal);
+		}
+		if (remaining.some((candidate) => candidate.id === target.id)) {
+			throw new Error(`Chrome did not close page ${target.id} in time`);
+		}
+		if (this.selectedPageId === target.id) this.selectedPageId = remaining[0]?.id;
+		this.pushRecentEvent(`Closed page: ${target.title || target.url}`);
+		return this.observeWithActionResult({ type: "close_page", closed: true, pageId: target.id }, signal);
+	}
+
+	private async evaluateRecord(
+		client: CdpClient,
+		expression: string,
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const value = readRemoteValue(
+			await client.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, signal),
+			"Runtime.evaluate",
+		);
+		return requireRecord(value, "Runtime.evaluate value");
+	}
+
+	private async searchPage(
+		client: CdpClient,
+		request: Extract<ComputerUseRequest, { action: "search_page" }>,
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		return this.evaluateRecord(
+			client,
+			`(() => {
+				const source = document.body?.innerText ?? "";
+				const pattern = ${JSON.stringify(request.pattern)};
+				const expression = ${request.regex ? "pattern" : 'pattern.replace(/[|\\\\{}()[\\]\\^$+*?.-]/g, "\\\\$&")'};
+				let matcher;
+				try { matcher = new RegExp(expression, ${JSON.stringify(request.caseSensitive ? "g" : "gi")}); }
+				catch (error) { return { type: "search_page", error: String(error), total: 0, matches: [] }; }
+				const matches = [];
+				let total = 0;
+				let match;
+				while ((match = matcher.exec(source)) !== null) {
+					total++;
+					if (matches.length < ${request.maxResults}) {
+						const start = Math.max(0, match.index - ${request.contextChars});
+						const end = Math.min(source.length, match.index + match[0].length + ${request.contextChars});
+						matches.push({ match: match[0], index: match.index, context: source.slice(start, end) });
+					}
+					if (match[0].length === 0) matcher.lastIndex++;
+				}
+				return { type: "search_page", total, matches, truncated: total > matches.length };
+			})()`,
+			signal,
+		);
+	}
+
+	private async findElements(
+		client: CdpClient,
+		request: Extract<ComputerUseRequest, { action: "find_elements" }>,
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		return this.evaluateRecord(
+			client,
+			`(() => {
+				const selector = ${JSON.stringify(request.selector)};
+				const attributes = ${JSON.stringify(request.attributes)};
+				let nodes;
+				try { nodes = Array.from(document.querySelectorAll(selector)); }
+				catch (error) { return { type: "find_elements", error: String(error), total: 0, elements: [] }; }
+				const elements = nodes.slice(0, ${request.maxResults}).map((node) => ({
+					tag: node.tagName.toLowerCase(),
+					${request.includeText ? 'text: (node.innerText || node.textContent || "").trim().slice(0, 500),' : ""}
+					attributes: Object.fromEntries(attributes.flatMap((name) => {
+						const value = node.getAttribute(name);
+						return value === null ? [] : [[name, value]];
+					})),
+				}));
+				return { type: "find_elements", total: nodes.length, elements, truncated: nodes.length > elements.length };
+			})()`,
+			signal,
+		);
+	}
+
+	private async findText(client: CdpClient, text: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+		return this.evaluateRecord(
+			client,
+			`(() => {
+				const needle = ${JSON.stringify(text)}.toLocaleLowerCase();
+				const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+				let node;
+				while ((node = walker.nextNode())) {
+					const content = node.textContent || "";
+					const index = content.toLocaleLowerCase().indexOf(needle);
+					if (index < 0) continue;
+					const range = document.createRange();
+					range.setStart(node, index);
+					range.setEnd(node, Math.min(content.length, index + needle.length));
+					const selection = window.getSelection();
+					selection?.removeAllRanges();
+					selection?.addRange(range);
+					(node.parentElement || document.documentElement).scrollIntoView({ block: "center", inline: "nearest" });
+					return { type: "find_text", found: true, text: content.trim().slice(0, 500) };
+				}
+				return { type: "find_text", found: false, text: ${JSON.stringify(text)} };
+			})()`,
+			signal,
+		);
+	}
+
+	private requireInteractiveElement(target: CdpTarget, index: number): InteractiveElementHandle {
+		const element = this.currentInteractiveElements.get(index);
+		if (!element || element.targetId !== target.id) {
+			throw new Error(`element index ${index} is not available in the current browser state`);
+		}
+		return element;
+	}
+
+	private async readElementBounds(
+		client: CdpClient,
+		backendNodeId: number,
+		signal?: AbortSignal,
+	): Promise<BrowserElementBounds> {
+		const response = requireRecord(
+			await client.send("DOM.getBoxModel", { backendNodeId }, signal),
+			"DOM.getBoxModel result",
+		);
+		const model = requireRecord(response.model, "DOM box model");
+		if (!Array.isArray(model.content) || model.content.length < 8)
+			throw new Error("DOM box model content is invalid");
+		const coordinates = model.content.map((value, index) =>
+			requireFiniteNumber(value, `DOM box coordinate ${index}`),
+		);
+		const xs = coordinates.filter((_, index) => index % 2 === 0);
+		const ys = coordinates.filter((_, index) => index % 2 === 1);
+		const x = Math.min(...xs);
+		const y = Math.min(...ys);
+		return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
+	}
+
+	private async clickInteractiveElement(
+		client: CdpClient,
+		target: CdpTarget,
+		index: number,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const element = this.requireInteractiveElement(target, index);
+		await client.send("DOM.scrollIntoViewIfNeeded", { backendNodeId: element.backendNodeId }, signal);
+		const resolved = requireRecord(
+			await client.send("DOM.resolveNode", { backendNodeId: element.backendNodeId }, signal),
+			"DOM.resolveNode result",
+		);
+		const objectId = requireString(requireRecord(resolved.object, "resolved DOM object").objectId, "DOM objectId");
+		await client.send(
+			"Runtime.callFunctionOn",
+			{ objectId, functionDeclaration: "function () { this.click(); }", returnByValue: true },
+			signal,
+		);
+	}
+
+	private async selectDropdown(
+		client: CdpClient,
+		target: CdpTarget,
+		index: number,
+		text: string,
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const element = this.requireInteractiveElement(target, index);
+		const resolved = requireRecord(
+			await client.send("DOM.resolveNode", { backendNodeId: element.backendNodeId }, signal),
+			"DOM.resolveNode result",
+		);
+		const objectId = requireString(requireRecord(resolved.object, "resolved DOM object").objectId, "DOM objectId");
+		const value = readRemoteValue(
+			await client.send(
+				"Runtime.callFunctionOn",
+				{
+					objectId,
+					functionDeclaration: `function (requested) {
+						if (!(this instanceof HTMLSelectElement)) return { selected: false, error: "element is not a select" };
+						const option = Array.from(this.options).find((candidate) => candidate.text === requested || candidate.value === requested);
+						if (!option) return { selected: false, error: "option not found" };
+						this.value = option.value;
+						this.dispatchEvent(new Event("input", { bubbles: true }));
+						this.dispatchEvent(new Event("change", { bubbles: true }));
+						return { selected: true, text: option.text, value: option.value };
+					}`,
+					arguments: [{ value: text }],
+					returnByValue: true,
+				},
+				signal,
+			),
+			"Runtime.callFunctionOn",
+		);
+		return { type: "select_dropdown", ...requireRecord(value, "select dropdown result") };
+	}
+
+	private async readInteractiveElements(
+		client: CdpClient,
+		target: CdpTarget,
+		viewport: BrowserViewport,
+		signal?: AbortSignal,
+	): Promise<BrowserInteractiveElement[]> {
+		await client.send("DOM.enable", {}, signal);
+		await client.send("Accessibility.enable", {}, signal);
+		const response = requireRecord(
+			await client.send("Accessibility.getFullAXTree", {}, signal),
+			"Accessibility.getFullAXTree result",
+		);
+		const nodes = Array.isArray(response.nodes) ? response.nodes : [];
+		const elements: BrowserInteractiveElement[] = [];
+		const handles = new Map<number, InteractiveElementHandle>();
+		for (const rawNode of nodes) {
+			if (elements.length >= MAX_INTERACTIVE_ELEMENTS || !isRecord(rawNode) || rawNode.ignored === true) continue;
+			const role = readAxValue(rawNode.role);
+			const backendNodeId = rawNode.backendDOMNodeId;
+			if (!role || !INTERACTIVE_ROLES.has(role) || typeof backendNodeId !== "number") continue;
+			let bounds: BrowserElementBounds;
+			try {
+				bounds = await this.readElementBounds(client, backendNodeId, signal);
+			} catch {
+				continue;
+			}
+			if (
+				bounds.width <= 0 ||
+				bounds.height <= 0 ||
+				bounds.x + bounds.width < 0 ||
+				bounds.y + bounds.height < 0 ||
+				bounds.x > viewport.width ||
+				bounds.y > viewport.height
+			) {
+				continue;
+			}
+			const nodeKey = `${target.id}:${backendNodeId}`;
+			let index = this.elementIndexByNode.get(nodeKey);
+			if (index === undefined) {
+				index = this.nextElementIndex++;
+				this.elementIndexByNode.set(nodeKey, index);
+			}
+			const properties = Array.isArray(rawNode.properties) ? rawNode.properties : [];
+			const disabled = properties.some(
+				(property) =>
+					isRecord(property) &&
+					property.name === "disabled" &&
+					isRecord(property.value) &&
+					property.value.value === true,
+			);
+			elements.push({
+				index,
+				role,
+				name: readAxValue(rawNode.name) ?? "",
+				...(readAxValue(rawNode.value) !== undefined ? { value: readAxValue(rawNode.value) } : {}),
+				...(disabled ? { disabled: true } : {}),
+				bounds,
+			});
+			handles.set(index, { targetId: target.id, backendNodeId });
+		}
+		this.currentInteractiveElements.clear();
+		for (const [index, handle] of handles) this.currentInteractiveElements.set(index, handle);
+		return elements;
+	}
+
 	private async capture(target: CdpTarget, targets: CdpTarget[], signal?: AbortSignal): Promise<BrowserObservation> {
 		return this.withClient(target, signal, async (client) => {
 			await client.send("Page.enable", {}, signal);
 			const viewport = await this.readViewport(client, signal);
-			const evaluated = requireRecord(
-				await client.send(
-					"Runtime.evaluate",
-					{ expression: "document.body?.innerText ?? ''", returnByValue: true },
-					signal,
-				),
-				"Runtime.evaluate result",
+			const pageState = await this.evaluateRecord(
+				client,
+				`(() => ({
+					text: document.body?.innerText ?? "",
+					scrollX: window.scrollX,
+					scrollY: window.scrollY,
+					contentWidth: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth ?? 0),
+					contentHeight: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0),
+				}))()`,
+				signal,
 			);
-			const remoteResult = requireRecord(evaluated.result, "Runtime.evaluate remote result");
-			const text = typeof remoteResult.value === "string" ? remoteResult.value.slice(0, MAX_PAGE_TEXT_CHARS) : "";
+			const text = typeof pageState.text === "string" ? pageState.text.slice(0, MAX_PAGE_TEXT_CHARS) : "";
+			const scrollX = requireFiniteNumber(pageState.scrollX, "page scrollX");
+			const scrollY = requireFiniteNumber(pageState.scrollY, "page scrollY");
+			const contentWidth = requirePositiveNumber(pageState.contentWidth, "page contentWidth");
+			const contentHeight = requirePositiveNumber(pageState.contentHeight, "page contentHeight");
+			const pageInfo: BrowserPageInfo = {
+				scrollX,
+				scrollY,
+				contentWidth,
+				contentHeight,
+				pagesAbove: Math.max(0, Math.floor(scrollY / viewport.height)),
+				pagesBelow: Math.max(0, Math.ceil((contentHeight - scrollY - viewport.height) / viewport.height)),
+			};
+			const interactiveElements = await this.readInteractiveElements(client, target, viewport, signal);
 			let screenshot: string | undefined;
 			if (this.captureScreenshots) {
 				const result = requireRecord(
@@ -597,12 +1036,16 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 				url: page.url,
 				isActive: page.id === this.selectedPageId,
 			}));
+			const recentEvents = this.recentEvents.splice(0);
 			return {
 				pageId: freshTarget.id,
 				title: freshTarget.title,
 				url: freshTarget.url,
 				viewport,
 				text,
+				pageInfo,
+				...(interactiveElements.length > 0 ? { interactiveElements } : {}),
+				...(recentEvents.length > 0 ? { recentEvents } : {}),
 				...(screenshot ? { screenshot } : {}),
 				pages:
 					pages.length > 0
@@ -666,6 +1109,7 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 			unblock = resolve;
 		});
 		const pausedRequests: Promise<unknown>[] = [];
+		const dialogResponses: Promise<unknown>[] = [];
 		const dispose = client.on("Fetch.requestPaused", (params) => {
 			try {
 				const event = requireRecord(params, "Fetch.requestPaused params");
@@ -693,6 +1137,12 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 				}
 				unblock?.();
 			}
+		});
+		const disposeDialog = client.on("Page.javascriptDialogOpening", (params) => {
+			const event = requireRecord(params, "Page.javascriptDialogOpening params");
+			const message = typeof event.message === "string" ? event.message : "";
+			this.pushRecentEvent(`Dismissed JavaScript dialog: ${message}`);
+			dialogResponses.push(client.send("Page.handleJavaScriptDialog", { accept: false }, signal));
 		});
 		const waitController = new AbortController();
 		const waitSignal = signal ? AbortSignal.any([signal, waitController.signal]) : waitController.signal;
@@ -730,10 +1180,11 @@ export class ChromeCdpBrowser implements ComputerUseBrowser {
 				}
 			}
 			waitController.abort();
-			await Promise.all(pausedRequests);
+			await Promise.all([...pausedRequests, ...dialogResponses]);
 		} finally {
 			waitController.abort();
 			dispose();
+			disposeDialog();
 			try {
 				await client.send("Fetch.disable", {}, signal);
 			} catch {}

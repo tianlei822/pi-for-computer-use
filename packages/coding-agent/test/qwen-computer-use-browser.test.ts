@@ -15,6 +15,31 @@ describe.runIf(process.platform === "darwin" && existsSync(CHROME_PATH))("qwen c
 
 	beforeEach(async () => {
 		server = createServer((request, response) => {
+			if (request.url === "/elements") {
+				response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+				response.end(`<!doctype html>
+<html>
+<head><title>elements</title></head>
+<body>
+  <button aria-label="Change title" onclick="document.title='button-clicked'">Change title</button>
+  <input aria-label="Indexed input" value="old" oninput="document.title='input:' + this.value">
+  <select aria-label="Choice" onchange="document.title='select:' + this.value">
+    <option value="a">Option A</option><option value="b">Option B</option>
+  </select>
+  <button aria-label="Open tab" onclick="window.open('/second', '_blank')">Open tab</button>
+  <button aria-label="Open dialog" onclick="alert('fixture dialog')">Open dialog</button>
+  <a class="result" href="/second" data-kind="fixture">Second page</a>
+  <div style="height:1600px"></div>
+  <p>Bottom needle text</p>
+</body>
+</html>`);
+				return;
+			}
+			if (request.url === "/second") {
+				response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+				response.end("<!doctype html><html><head><title>second</title></head><body>Second page</body></html>");
+				return;
+			}
 			if (request.url === "/profile") {
 				const restored = request.headers.cookie?.includes("pi-cua-profile=restored") ?? false;
 				response.writeHead(200, {
@@ -132,6 +157,105 @@ describe.runIf(process.platform === "darwin" && existsSync(CHROME_PATH))("qwen c
 
 		expect(observation.text).toContain("Local fixture");
 		expect(observation.screenshot).toBeUndefined();
+	});
+
+	it("searches page text, queries elements, finds text, waits, and goes back", async () => {
+		browser = new ChromeCdpBrowser({
+			executablePath: CHROME_PATH,
+			startUrl: `${origin}/elements`,
+			allowedOrigins: [origin],
+			headless: true,
+			captureScreenshots: false,
+			actionDelayMs: 50,
+		});
+
+		const initial = await browser.observe();
+		expect(initial.pageInfo).toMatchObject({ scrollY: 0 });
+		expect(initial.pageInfo?.pagesBelow).toBeGreaterThan(1);
+
+		const search = await browser.execute({
+			action: "search_page",
+			pattern: "option [ab]",
+			regex: true,
+			caseSensitive: false,
+			contextChars: 20,
+			maxResults: 10,
+		});
+		expect(search.actionResult).toMatchObject({ type: "search_page", total: 2 });
+
+		const foundElements = await browser.execute({
+			action: "find_elements",
+			selector: "a.result",
+			attributes: ["href", "data-kind"],
+			includeText: true,
+			maxResults: 10,
+		});
+		expect(foundElements.actionResult).toMatchObject({
+			type: "find_elements",
+			total: 1,
+			elements: [{ tag: "a", text: "Second page", attributes: { href: "/second", "data-kind": "fixture" } }],
+		});
+
+		const foundText = await browser.execute({ action: "find_text", text: "Bottom needle" });
+		expect(foundText.actionResult).toMatchObject({ type: "find_text", found: true });
+		expect(foundText.pageInfo?.scrollY).toBeGreaterThan(0);
+
+		const waited = await browser.execute({ action: "wait", seconds: 0 });
+		expect(waited.actionResult).toEqual({ type: "wait", seconds: 0 });
+
+		await browser.execute({ action: "navigate", url: `${origin}/second` });
+		const returned = await browser.execute({ action: "go_back" });
+		expect(returned.url).toBe(`${origin}/elements`);
+		expect(returned.actionResult).toEqual({ type: "go_back", navigated: true });
+	});
+
+	it("uses indexed accessible elements and manages tabs and dialogs", async () => {
+		browser = new ChromeCdpBrowser({
+			executablePath: CHROME_PATH,
+			startUrl: `${origin}/elements`,
+			allowedOrigins: [origin],
+			headless: true,
+			captureScreenshots: false,
+			actionDelayMs: 50,
+		});
+
+		const initial = await browser.observe();
+		const titleButton = initial.interactiveElements?.find((element) => element.name === "Change title");
+		const input = initial.interactiveElements?.find((element) => element.name === "Indexed input");
+		const select = initial.interactiveElements?.find((element) => element.name === "Choice");
+		const openTab = initial.interactiveElements?.find((element) => element.name === "Open tab");
+		const openDialog = initial.interactiveElements?.find((element) => element.name === "Open dialog");
+		expect(titleButton?.role).toBe("button");
+		expect(input?.role).toBe("textbox");
+		expect(select?.role).toBe("combobox");
+
+		const clicked = await browser.execute({ action: "click_element", index: titleButton?.index ?? 0 });
+		expect(clicked.title).toBe("button-clicked");
+
+		const typed = await browser.execute({
+			action: "input_element",
+			index: input?.index ?? 0,
+			text: "new value",
+			clear: true,
+		});
+		expect(typed.title).toBe("input:new value");
+
+		const selected = await browser.execute({
+			action: "select_dropdown",
+			index: select?.index ?? 0,
+			text: "Option B",
+		});
+		expect(selected.title).toBe("select:b");
+
+		const dialog = await browser.execute({ action: "click_element", index: openDialog?.index ?? 0 });
+		expect(dialog.recentEvents).toContain("Dismissed JavaScript dialog: fixture dialog");
+
+		const newTab = await browser.execute({ action: "click_element", index: openTab?.index ?? 0 });
+		expect(newTab.url).toBe(`${origin}/second`);
+		expect(newTab.pages).toHaveLength(2);
+		const closed = await browser.execute({ action: "close_page" });
+		expect(closed.url).toBe(`${origin}/elements`);
+		expect(closed.actionResult).toMatchObject({ type: "close_page", closed: true });
 	});
 
 	it("preserves site data in a configured user data directory", async () => {

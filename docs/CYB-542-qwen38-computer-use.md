@@ -1,7 +1,7 @@
 ---
 linear_issue: CYB-542
-status: implementing
-updated: 2026-09-03
+status: completed
+updated: 2026-09-04
 implementation_branch: tianlei/cyb-542-qwen38-pi-computer-use
 last_live_smoke: 2026-08-31
 ---
@@ -348,7 +348,16 @@ actions:
 - `screenshot`
 - `list_pages`
 - `switch_page`
+- `close_page`
 - `navigate`
+- `go_back`
+- `wait`
+- `find_text`
+- `search_page`
+- `find_elements`
+- `click_element`
+- `input_element`
+- `select_dropdown`
 - `left_click`
 - `double_click`
 - `type`
@@ -357,8 +366,19 @@ actions:
 
 Coordinates use the Qwen CUA convention `[0, 1000]` and are scaled to the
 current CSS viewport locally. Every action returns a fresh observation with up
-to 12,000 characters of visible page text. Screenshots are optional; coordinate
-clicks are less reliable in text-only mode.
+to 12,000 characters of visible page text, page metrics, and visible interactive
+controls indexed from Chrome's Accessibility tree. Results can also contain
+recent tab/dialog events and action-specific structured data. Screenshots are
+optional; indexed controls are preferred in text-only mode.
+
+The implementation adapts selected patterns from
+[`browser-use/browser-use`](https://github.com/browser-use/browser-use) without
+adding it as a dependency or replacing Pi's agent loop. The migrated scope is
+indexed accessible-element click/input/select, page text and CSS-selector
+queries, find-and-scroll, history/back, wait and close-page actions, automatic
+new-tab selection, dialog reporting, page scroll metrics, and repeated-action
+or unchanged-state warnings. Browser-use's Python agent, model adapters, cloud,
+MCP, CLI, and credential layers remain out of scope.
 
 Chrome starts lazily with:
 
@@ -451,9 +471,10 @@ the resulting local page state.
   tool registration, configured local tool selection, and
   text-only/optional-screenshot result shapes.
 - Browser integration: isolated Chrome starts, loads a loopback fixture, accepts
-  a local click/type action, returns visible text with or without a screenshot,
-  tolerates a slow page event, ignores cross-origin subframe loads for top-level
-  navigation policy, and shuts down.
+  coordinate and indexed click/type/select actions, searches text and elements,
+  navigates history, manages tabs and dialogs, returns rich observations with
+  or without a screenshot, tolerates a slow page event, ignores cross-origin
+  subframe loads for top-level navigation policy, and shuts down.
 - Provider contract: opt-in live Qwen test for streamed tool calls and image
   continuation; never runs in uncredentialed CI.
 - Repository: focused Vitest files followed by `npm run check`.
